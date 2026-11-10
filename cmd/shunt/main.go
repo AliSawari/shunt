@@ -18,9 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
-
-	"fyne.io/systray"
 
 	"shunt/internal/core"
 	"shunt/internal/netif"
@@ -99,9 +96,10 @@ func load(path string) *profile.Profile {
 func main() {
 	log.SetFlags(log.Ltime)
 	if len(os.Args) < 2 {
-		usage()
+		gui()
 		return
 	}
+	attachConsole()
 	cmd, args := os.Args[1], os.Args[2:]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	prof := fs.String("profile", defaultProfile(), "profile file")
@@ -187,6 +185,8 @@ func main() {
 		if !res.OK {
 			os.Exit(1)
 		}
+	case "mkicon":
+		os.WriteFile(pos[0], icon(), 0o644)
 	case "run":
 		run(load(*prof), *prof, *verbose, !*notray)
 	default:
@@ -214,37 +214,9 @@ func run(p *profile.Profile, path string, verbose, tray bool) {
 		log.Printf("stopping, restoring routes")
 		e.Stop()
 	}
-	if !tray {
-		<-stop
-		quit()
-		return
-	}
-	systray.Run(func() {
-		systray.SetIcon(icon())
-		systray.SetTitle("Shunt")
-		systray.SetTooltip("Shunt - running")
-		info := systray.AddMenuItem("Shunt "+version, "")
-		info.Disable()
-		systray.AddSeparator()
-		mQuit := systray.AddMenuItem("Stop and exit", "Stop the tunnel and restore normal routing")
-		go func() {
-			t := time.NewTicker(2 * time.Second)
-			for {
-				select {
-				case <-t.C:
-					s := fmt.Sprintf("%d active, %d total, %d failed  -  sent %s, received %s", e.Active.Load(), e.Total.Load(), e.Failed.Load(), size(e.Sent.Load()), size(e.Recv.Load()))
-					info.SetTitle(s)
-					systray.SetTooltip("Shunt - " + s)
-				case <-mQuit.ClickedCh:
-					systray.Quit()
-					return
-				case <-stop:
-					systray.Quit()
-					return
-				}
-			}
-		}()
-	}, quit)
+	_ = tray
+	<-stop
+	quit()
 }
 
 func size(n int64) string {
@@ -260,7 +232,7 @@ func size(n int64) string {
 }
 
 // icon draws the Shunt mark (one track splitting into two) as an .ico.
-func icon() []byte {
+func iconImage() *image.RGBA {
 	const n = 64
 	img := image.NewRGBA(image.Rect(0, 0, n, n))
 	seg := func(x, y, ax, ay, bx, by float64) float64 { // distance to segment
@@ -286,8 +258,13 @@ func icon() []byte {
 			img.SetRGBA(x, y, c)
 		}
 	}
+	return img
+}
+
+func icon() []byte {
+	const n = 64
 	var p bytes.Buffer
-	png.Encode(&p, img)
+	png.Encode(&p, iconImage())
 	var b bytes.Buffer
 	binary.Write(&b, binary.LittleEndian, []uint16{0, 1, 1})
 	b.Write([]byte{n, n, 0, 0})

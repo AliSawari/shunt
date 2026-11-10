@@ -41,6 +41,9 @@ type Engine struct {
 	failed map[int]time.Time // redundancy: proxy id -> time it failed
 	sticky map[uint32]int    // load balancing: pid -> proxy id
 
+	conns  sync.Map
+	nextID atomic.Int64
+
 	Active, Total, Failed, Sent, Recv atomic.Int64
 	Verbose                           bool
 }
@@ -164,7 +167,7 @@ func (e *Engine) HandleTCP(r tun.TCPRequest) {
 	if h, fake := e.res.HostFor(f.ip); h != "" {
 		f.host, f.fakeOnly = h, fake
 	}
-	up, label, err := e.connect(context.Background(), &f)
+	up, label, rule, err := e.connect(context.Background(), &f)
 	if err != nil {
 		r.Reject()
 		return
@@ -174,7 +177,7 @@ func (e *Engine) HandleTCP(r tun.TCPRequest) {
 		up.Close()
 		return
 	}
-	e.relay(c, up, &f, label)
+	e.relay(c, up, &f, label, rule)
 }
 
 // HandleUDP implements tun.Handler: DNS is answered by the resolver, other
@@ -270,7 +273,7 @@ func (e *Engine) matchRule(f *flow) (int, *profile.Rule) {
 }
 
 // connect applies the rules to a flow and opens the upstream connection.
-func (e *Engine) connect(ctx context.Context, f *flow) (net.Conn, string, error) {
+func (e *Engine) connect(ctx context.Context, f *flow) (net.Conn, string, *profile.Rule, error) {
 	_, rule := e.matchRule(f)
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -280,7 +283,7 @@ func (e *Engine) connect(ctx context.Context, f *flow) (net.Conn, string, error)
 	switch rule.Action.Type {
 	case profile.ActBlock:
 		log.Printf("%s - %s blocked by rule %q", f.proc.Name, f.target(), rule.Name)
-		return nil, "", errors.New("blocked")
+		return nil, "", rule, errors.New("blocked")
 	case profile.ActProxy:
 		px := e.prof.ProxyByID(rule.Action.ID)
 		label = "through proxy " + px.HostPort() + " " + px.Type
@@ -295,12 +298,12 @@ func (e *Engine) connect(ctx context.Context, f *flow) (net.Conn, string, error)
 	if err != nil {
 		e.Failed.Add(1)
 		log.Printf("%s - %s error: %v (rule %q)", f.proc.Name, f.target(), err, rule.Name)
-		return nil, "", err
+		return nil, "", rule, err
 	}
 	if rule.Action.Type != profile.ActDirect || e.prof.Options.HandleDirectConnections || e.Verbose {
 		log.Printf("%s - %s open %s (rule %q)", f.proc.Name, f.target(), label, rule.Name)
 	}
-	return c, label, nil
+	return c, label, rule, nil
 }
 
 func (e *Engine) direct(ctx context.Context, rule *profile.Rule, f *flow) (net.Conn, error) {
@@ -388,20 +391,64 @@ func (e *Engine) viaChainDef(ctx context.Context, ch *profile.Chain, f *flow) (n
 	return e.viaChain(ctx, list, f)
 }
 
-func (e *Engine) relay(app, up net.Conn, f *flow, label string) {
+// ConnInfo is a live connection as shown in the connections list.
+type ConnInfo struct {
+	ID         int64
+	App        string
+	PID        uint32
+	Target     string
+	Rule, Via  string
+	Start      time.Time
+	Sent, Recv atomic.Int64
+	Closed     atomic.Bool
+	app, up    net.Conn
+}
+
+// Disconnect closes the connection.
+func (c *ConnInfo) Disconnect() {
+	c.app.Close()
+	c.up.Close()
+}
+
+// Conns returns a snapshot of the displayed connections.
+func (e *Engine) Conns() []*ConnInfo {
+	var out []*ConnInfo
+	e.conns.Range(func(_, v any) bool {
+		out = append(out, v.(*ConnInfo))
+		return true
+	})
+	return out
+}
+
+type counter struct {
+	io.Writer
+	n, total *atomic.Int64
+}
+
+func (c counter) Write(p []byte) (int, error) {
+	n, err := c.Writer.Write(p)
+	c.n.Add(int64(n))
+	c.total.Add(int64(n))
+	return n, err
+}
+
+func (e *Engine) relay(app, up net.Conn, f *flow, label string, rule *profile.Rule) {
 	e.Active.Add(1)
 	e.Total.Add(1)
-	start := time.Now()
-	var sent, recv int64
+	ci := &ConnInfo{ID: e.nextID.Add(1), App: f.proc.Name, PID: f.proc.PID, Target: f.target(), Rule: rule.Name, Via: label, Start: time.Now(), app: app, up: up}
+	shown := rule.Action.Type != profile.ActDirect || e.prof.Options.HandleDirectConnections
+	if shown {
+		e.conns.Store(ci.ID, ci)
+	}
 	done := make(chan struct{})
 	go func() {
-		recv, _ = io.Copy(app, up)
+		io.Copy(counter{app, &ci.Recv, &e.Recv}, up)
 		if cw, ok := app.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
 		}
 		close(done)
 	}()
-	sent, _ = io.Copy(up, app)
+	io.Copy(counter{up, &ci.Sent, &e.Sent}, app)
 	if cw, ok := up.(interface{ CloseWrite() error }); ok {
 		cw.CloseWrite()
 	} else {
@@ -415,9 +462,9 @@ func (e *Engine) relay(app, up net.Conn, f *flow, label string) {
 	up.Close()
 	<-done
 	e.Active.Add(-1)
-	e.Sent.Add(sent)
-	e.Recv.Add(recv)
+	ci.Closed.Store(true)
+	time.AfterFunc(3*time.Second, func() { e.conns.Delete(ci.ID) })
 	if e.Verbose {
-		log.Printf("%s - %s close, %d bytes sent, %d bytes received, lifetime %s", f.proc.Name, f.target(), sent, recv, time.Since(start).Round(time.Second))
+		log.Printf("%s - %s close, %d bytes sent, %d bytes received, lifetime %s", ci.App, ci.Target, ci.Sent.Load(), ci.Recv.Load(), time.Since(ci.Start).Round(time.Second))
 	}
 }
