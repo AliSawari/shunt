@@ -1,0 +1,124 @@
+# Shunt
+
+**A free and open source system-wide proxifier for Windows.** Shunt sends the
+connections of every application – including ones with no proxy settings –
+through a SOCKS5, SOCKS4/4A or HTTP(S) proxy, with per-application and
+per-destination rules. It is a single ~8 MB native executable written in Go:
+no Electron, no runtime, no installer required.
+
+> Status: **early (v0.1.0)**. The rule engine, profile import and proxy
+> checker have been exercised; the tunnel itself (`shunt run`) has **not yet
+> been tested end to end** – see [Status](#status).
+
+## How it works
+
+```
+ application ──► Windows routing ──► "Shunt" virtual adapter (Wintun)
+                                             │ raw IP packets
+                                             ▼
+                              userspace TCP/IP stack (gVisor netstack)
+                                             │ connection + owning process
+                                             ▼
+                          rules: application / target host / port
+                         ┌───────────┬───────────────┬──────────┐
+                         ▼           ▼               ▼          ▼
+                       Direct      Proxy        Proxy chain    Block
+```
+
+Shunt's own outbound sockets are pinned to the physical network interface, so
+they never loop back into the tunnel. DNS queries are captured as well, which
+lets rules match on host names and lets names be resolved by the proxy
+(fake-IP answers from `198.18.0.0/15`).
+
+## Features
+
+| Area | What is implemented |
+| --- | --- |
+| Proxy protocols | SOCKS5 (user/password auth, remote DNS), SOCKS4, SOCKS4A, HTTPS (CONNECT, basic auth), plain HTTP |
+| Proxy chains | Simple chain, redundancy (failover, timeout, recheck, optional direct fallback), load balancing (random, optional same-proxy-per-PID) |
+| Rules | Processed top to bottom; match by application (`chrome.exe; "C:\some app.exe"; fire*.exe`), target (`*.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255; 10.0.0.0/8; %ComputerName%; %SimpleHostnames%`) and port (`80; 8000-9000`); actions Direct / Block / Proxy / Chain; optional network-interface pinning |
+| Name resolution | Automatic detection, resolve through proxy, exclusion / only-from list, block non A/AAAA queries |
+| UDP | Bypass, block UDP 443 (QUIC) for proxied rules, block all UDP for proxied rules |
+| Safety | Connection-loop detection (a proxy running on this PC always connects directly), DNS/IP leak prevention mode, services / other users filtering |
+| Profiles | JSON profiles, **import and export of Proxifier `.ppx` files**, passwords stored plain / static key / Windows DPAPI / master password |
+| Tools | Proxy checker (reachability, connection through the proxy, latency), system tray icon with live counters, log file |
+
+## Quick start
+
+1. Download `wintun.dll` (amd64) from <https://www.wintun.net> and put it next
+   to `shunt.exe`. It is the signed WireGuard TUN driver Shunt uses to capture
+   traffic.
+2. Create a profile, or import your Proxifier one:
+
+   ```
+   shunt init -proxy socks5://127.0.0.1:1080
+   shunt import "%APPDATA%\Proxifier4\Profiles\Default.ppx"
+   ```
+3. Test the proxy: `shunt check socks5://127.0.0.1:1080`
+4. From an **Administrator** terminal: `shunt run` (add `-v` for a verbose log).
+   Stop with the tray icon or Ctrl+C; routing is restored when the adapter is
+   removed.
+
+Do not run Shunt and Proxifier at the same time – both would try to capture
+the same connections.
+
+### Commands
+
+```
+shunt run    [-profile FILE] [-v] [-notray]   start the tunnel
+shunt init   [-proxy URL] [-o FILE]           create a profile sending everything to a proxy
+shunt import FILE.ppx [-o FILE]               convert a Proxifier profile
+shunt export FILE.ppx [-profile FILE]         export in Proxifier format
+shunt check  URL [-target host:port]          test a proxy
+shunt show   [-profile FILE]                  print proxies and rules
+```
+
+The default profile is `%APPDATA%\Shunt\Default.shunt.json`; the log is
+`%APPDATA%\Shunt\shunt.log`. For master-password profiles set
+`SHUNT_MASTER_PASSWORD`. See [docs/profile.md](docs/profile.md) for the
+profile format.
+
+## Build
+
+Requires Go 1.26+ (no C compiler):
+
+```
+go build -trimpath -ldflags "-s -w" -o dist/shunt.exe ./cmd/shunt
+```
+
+To embed the driver into the executable, place it at
+`internal/tun/embedded/wintun_amd64.dll` before building.
+
+## Status
+
+Verified on Windows 11: build, `go vet`, Proxifier profile import, rule
+listing, and the proxy checker against a live SOCKS5 proxy.
+
+Not yet verified: the live tunnel (`shunt run`), because it needs
+administrator rights and would have replaced the network path of the machine
+it was developed on. Treat it as untested. Also not done yet:
+
+- graphical interface (only the tray icon and CLI exist), installer, automated tests
+- UDP through SOCKS5 (UDP is bypassed or blocked), NTLM / Kerberos proxy auth
+- traffic on the local subnet bypasses the tunnel (more specific route)
+- Linux and macOS: source stubs exist but are unfinished
+
+## Layout
+
+```
+cmd/shunt          command line entry point and tray icon
+internal/core      engine: rule decision, direct / proxy / chain dialling, relay
+internal/tun       Wintun device, routes, gVisor netstack
+internal/dns       fake-IP pool and DNS query handling
+internal/rules     application / target / port matching
+internal/proxy     SOCKS5, SOCKS4/4A, HTTPS, HTTP handshakes, chains, checker
+internal/profile   profile model, encryption, Proxifier .ppx import/export
+internal/procinfo  socket -> process lookup
+internal/netif     physical interface detection and socket binding
+```
+
+## License
+
+MIT – see [LICENSE](LICENSE). Shunt is an independent project and is not
+affiliated with Proxifier or VentoByte; "Proxifier" is a trademark of its
+owner. Wintun is © WireGuard LLC and distributed under its own license.
