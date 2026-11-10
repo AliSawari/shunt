@@ -2,3 +2,4 @@ dist/
 *.exe
 *.dll
 *.zip
+!third_party/wintun/amd64/wintun.dll

@@ -46,9 +46,9 @@ lets rules match on host names and lets names be resolved by the proxy
 
 ## Quick start
 
-1. Download `wintun.dll` (amd64) from <https://www.wintun.net> and put it next
-   to `shunt.exe`. It is the signed WireGuard TUN driver Shunt uses to capture
-   traffic.
+1. Keep `wintun.dll` next to `shunt.exe`. It is the signed WireGuard TUN driver
+   (Wintun 0.14.1, from <https://www.wintun.net>) Shunt uses to capture traffic;
+   an unmodified copy is in `third_party/wintun/amd64/` under its own license.
 2. Create a profile, or import your Proxifier one:
 
    ```
