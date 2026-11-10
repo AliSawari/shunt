@@ -101,7 +101,7 @@ it was developed on. Treat it as untested. Also not done yet:
 - graphical interface (only the tray icon and CLI exist), installer, automated tests
 - UDP through SOCKS5 (UDP is bypassed or blocked), NTLM / Kerberos proxy auth
 - traffic on the local subnet bypasses the tunnel (more specific route)
-- Linux and macOS: source stubs exist but are unfinished
+- Linux and macOS are not supported yet
 
 ## Layout
 
