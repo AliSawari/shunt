@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,7 +89,18 @@ func (m *connModel) Value(row, col int) interface{} {
 	return ""
 }
 
+// usesProxy reports whether any enabled rule routes through a proxy or chain.
+func usesProxy(p *profile.Profile) bool {
+	for _, r := range p.Rules {
+		if r.Enabled && (r.Action.Type == profile.ActProxy || r.Action.Type == profile.ActChain) {
+			return true
+		}
+	}
+	return false
+}
+
 func gui() {
+	autoStart := len(os.Args) > 1 && os.Args[1] == "-start"
 	a := &app{path: defaultProfile(), kr: &profile.Keyring{Master: os.Getenv("SHUNT_MASTER_PASSWORD")}, conns: &connModel{}}
 	os.MkdirAll(configDir(), 0o755)
 	if p, err := profile.Load(a.path, a.kr); err == nil {
@@ -95,7 +108,11 @@ func gui() {
 	} else {
 		a.prof = profile.Default()
 	}
-	log.SetOutput(a)
+	var out io.Writer = a
+	if lf, err := os.OpenFile(filepath.Join(configDir(), "shunt.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		out = io.MultiWriter(a, lf)
+	}
+	log.SetOutput(out)
 
 	err := MainWindow{
 		AssignTo: &a.mw,
@@ -168,6 +185,9 @@ func gui() {
 			a.mw.Synchronize(a.refresh)
 		}
 	}()
+	if autoStart {
+		a.mw.Synchronize(a.toggle)
+	}
 	a.mw.Run()
 }
 
@@ -227,10 +247,14 @@ func (a *app) toggle() {
 			exe, _ := os.Executable()
 			verb, _ := windows.UTF16PtrFromString("runas")
 			file, _ := windows.UTF16PtrFromString(exe)
-			if windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL) == nil {
+			args, _ := windows.UTF16PtrFromString("-start")
+			if windows.ShellExecute(0, verb, file, args, nil, windows.SW_SHOWNORMAL) == nil {
 				a.mw.Close()
 			}
 		}
+		return
+	}
+	if !usesProxy(a.prof) && walk.MsgBox(a.mw, "Shunt", "No enabled rule sends traffic to a proxy server, so every connection will go directly.\n\nOpen Proxification Rules and set the Default rule to your proxy, or press Yes to start anyway.", walk.MsgBoxYesNo|walk.MsgBoxIconWarning) != walk.DlgCmdYes {
 		return
 	}
 	e, err := core.New(a.prof.Clone())

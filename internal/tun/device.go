@@ -17,6 +17,9 @@ type NetConfig struct {
 	// HostRoutes are extra destinations forced through the tunnel (the
 	// system's own DNS servers, so that their queries are captured too).
 	HostRoutes []netip.Addr
+	// Routes, when non-nil, replaces the default 0.0.0.0/1 + 128.0.0.0/1 capture
+	// (used by the scoped diagnostic mode).
+	Routes []netip.Prefix
 }
 
 // DefaultNetConfig returns the standard Shunt tunnel configuration.

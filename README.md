@@ -97,9 +97,10 @@ To embed the driver into the executable, place it at
 Verified on Windows 11: build, `go vet`, Proxifier profile import, rule
 listing, and the proxy checker against a live SOCKS5 proxy.
 
-Not yet verified: the live tunnel (`shunt run`), because it needs
-administrator rights and would have replaced the network path of the machine
-it was developed on. Treat it as untested. Also not done yet:
+Verified on the real Wintun adapter with `shunt diag` (routes only test
+addresses into the tunnel): adapter and route setup, process identification,
+proxied and direct connections, and DNS through the tunnel resolver. Not yet
+verified: a full system-wide session (all routes). Also not done yet:
 
 - the GUI main window opens and was checked; its dialogs (proxy servers, rules, name resolution, advanced) compile but were not clicked through
 - proxy chains have no editor yet (edit them in the profile file); no installer, tray icon or automated tests

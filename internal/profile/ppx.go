@@ -61,9 +61,9 @@ type ppxFile struct {
 }
 
 type ppxProxy struct {
-	ID      int    `xml:"id,attr"`
-	Type    string `xml:"type,attr"`
-	Auth    *struct {
+	ID   int    `xml:"id,attr"`
+	Type string `xml:"type,attr"`
+	Auth *struct {
 		Enabled  bool   `xml:"enabled,attr"`
 		Username string `xml:"Username"`
 		Password string `xml:"Password,omitempty"`

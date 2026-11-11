@@ -43,10 +43,10 @@ func table(proc *windows.LazyProc, family, class uintptr) []byte {
 func port(b []byte) uint16 { return binary.BigEndian.Uint16(b[:2]) }
 
 type tcpRow struct {
-	state        uint32
-	local        netip.AddrPort
-	remote       netip.AddrPort
-	pid          uint32
+	state  uint32
+	local  netip.AddrPort
+	remote netip.AddrPort
+	pid    uint32
 }
 
 func tcpRows() []tcpRow {
@@ -183,11 +183,9 @@ func queryPID(pid uint32) Info {
 				info.OtherUser = true
 			}
 		}
-	} else if !info.Service {
-		// Cannot inspect the token of a process in an interactive session:
-		// it belongs to someone else.
-		info.OtherUser = !selfSystem
 	}
+	// When the token cannot be read the process is treated as the current
+	// user's: guessing "other user" would silently bypass the proxy.
 	return info
 }
 

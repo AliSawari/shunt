@@ -95,7 +95,7 @@ func load(path string) *profile.Profile {
 
 func main() {
 	log.SetFlags(log.Ltime)
-	if len(os.Args) < 2 {
+	if len(os.Args) < 2 || os.Args[1] == "-start" {
 		gui()
 		return
 	}
@@ -108,6 +108,9 @@ func main() {
 	pxURL := fs.String("proxy", "socks5://127.0.0.1:1080", "proxy URL")
 	out := fs.String("o", defaultProfile(), "output file")
 	target := fs.String("target", "www.google.com:80", "test target")
+	scope := fs.String("route", "1.0.0.1/32,1.1.1.1/32", "diag: destinations routed into the tunnel")
+	secs := fs.Int("seconds", 60, "diag: how long to keep the tunnel up")
+	logPath := fs.String("log", "", "diag: log file")
 	var pos []string
 	for len(args) > 0 { // allow flags after positional arguments
 		fs.Parse(args)
@@ -185,6 +188,8 @@ func main() {
 		if !res.OK {
 			os.Exit(1)
 		}
+	case "diag":
+		diag(*pxURL, *scope, *secs, *logPath)
 	case "mkicon":
 		os.WriteFile(pos[0], icon(), 0o644)
 	case "run":

@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,9 @@ func New(p *profile.Profile) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{prof: p, match: rules.Compile(p), failed: map[int]time.Time{}, sticky: map[uint32]int{}, selfPID: map[uint32]bool{}}
+	// Shunt's own sockets are bound to the physical interface; should one ever
+	// reach the tunnel anyway, it must not be proxified back into itself.
+	e.selfPID[uint32(os.Getpid())] = true
 	e.bind.Store(&netif.Binding{})
 	e.dial = netif.Dialer(func() netif.Binding { return *e.bind.Load() })
 	// Infinite connection loop detection: a proxy running on this machine
@@ -78,7 +82,14 @@ func (e *Engine) resolverConfig(viaProxy bool, upstreams []string) dns.Config {
 }
 
 // StartTUN captures the whole system through a virtual network interface.
-func (e *Engine) StartTUN() error {
+func (e *Engine) StartTUN() error { return e.start(nil) }
+
+// StartScoped is StartTUN restricted to the given destinations: only they are
+// routed into the tunnel, and system DNS and IPv6 are left alone. It is used to
+// diagnose the tunnel without disturbing the rest of the machine.
+func (e *Engine) StartScoped(routes []netip.Prefix) error { return e.start(routes) }
+
+func (e *Engine) start(scope []netip.Prefix) error {
 	phys, err := netif.Default(0)
 	if err != nil {
 		return err
@@ -107,6 +118,10 @@ func (e *Engine) StartTUN() error {
 			cfg.HostRoutes = append(cfg.HostRoutes, ap.Addr())
 		}
 	}
+	if scope != nil {
+		cfg.Routes, cfg.HostRoutes, cfg.DNS4, cfg.Addr6 = scope, nil, netip.Addr{}, netip.Prefix{}
+	}
+	log.Printf("tunnel config: routes=%v host-routes=%v dns=%v", map[bool]any{true: cfg.Routes, false: "0.0.0.0/1 128.0.0.0/1"}[scope != nil], cfg.HostRoutes, cfg.DNS4)
 	if e.stack, err = tun.NewStack(cfg.MTU, e); err != nil {
 		return err
 	}
@@ -301,7 +316,7 @@ func (e *Engine) connect(ctx context.Context, f *flow) (net.Conn, string, *profi
 		return nil, "", rule, err
 	}
 	if rule.Action.Type != profile.ActDirect || e.prof.Options.HandleDirectConnections || e.Verbose {
-		log.Printf("%s - %s open %s (rule %q)", f.proc.Name, f.target(), label, rule.Name)
+		log.Printf("%s (%d) - %s open %s (rule %q)", f.proc.Name, f.proc.PID, f.target(), label, rule.Name)
 	}
 	return c, label, rule, nil
 }
