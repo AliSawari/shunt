@@ -100,7 +100,7 @@ To embed the driver into the executable, place it at
 
 ## Status
 
-Logs: `%APPDATA%Shuntshunt.log`; fatal errors are written to `%APPDATA%Shuntash.log`
+Logs: `%APPDATA%\Shunt\shunt.log`; fatal errors are written to `%APPDATA%\Shunt\crash.log`
 (**File > Open Log Folder**). Only one Shunt window runs at a time.
 
 Verified on Windows 11: build, `go vet`, Proxifier profile import, rule
