@@ -2,331 +2,16 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"log"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
-	"golang.org/x/sys/windows"
 
-	"shunt/internal/core"
 	"shunt/internal/netif"
 	"shunt/internal/profile"
 	"shunt/internal/proxy"
-	"shunt/internal/tun"
 )
-
-// attachConsole lets the CLI sub-commands print to the terminal they were
-// started from even though shunt.exe is a GUI-subsystem program.
-func attachConsole() {
-	if windows.NewLazySystemDLL("kernel32.dll").NewProc("AttachConsole").Call(^uintptr(0)); true {
-		if f, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
-			os.Stdout, os.Stderr = f, f
-			log.SetOutput(f)
-		}
-	}
-}
-
-type app struct {
-	mw       *walk.MainWindow
-	prof     *profile.Profile
-	path     string
-	kr       *profile.Keyring
-	eng      *core.Engine
-	startAct *walk.Action
-	connTV   *walk.TableView
-	conns    *connModel
-	logTE    *walk.TextEdit
-	sbi      *walk.StatusBarItem
-
-	logMu  sync.Mutex
-	logBuf strings.Builder
-}
-
-func (a *app) Write(p []byte) (int, error) {
-	a.logMu.Lock()
-	a.logBuf.Write(p)
-	a.logMu.Unlock()
-	return len(p), nil
-}
-
-// ---- connections table -----------------------------------------------------
-
-type connModel struct {
-	walk.TableModelBase
-	rows []*core.ConnInfo
-}
-
-func (m *connModel) RowCount() int { return len(m.rows) }
-func (m *connModel) Value(row, col int) interface{} {
-	c := m.rows[row]
-	switch col {
-	case 0:
-		return fmt.Sprintf("%s (%d)", c.App, c.PID)
-	case 1:
-		return c.Target
-	case 2:
-		if c.Closed.Load() {
-			return "Closed"
-		}
-		d := time.Since(c.Start)
-		return fmt.Sprintf("%02d:%02d", int(d.Minutes()), int(d.Seconds())%60)
-	case 3:
-		return c.Rule + " : " + c.Via
-	case 4:
-		return size(c.Sent.Load())
-	case 5:
-		return size(c.Recv.Load())
-	}
-	return ""
-}
-
-// usesProxy reports whether any enabled rule routes through a proxy or chain.
-func usesProxy(p *profile.Profile) bool {
-	for _, r := range p.Rules {
-		if r.Enabled && (r.Action.Type == profile.ActProxy || r.Action.Type == profile.ActChain) {
-			return true
-		}
-	}
-	return false
-}
-
-func gui() {
-	autoStart := len(os.Args) > 1 && os.Args[1] == "-start"
-	a := &app{path: defaultProfile(), kr: &profile.Keyring{Master: os.Getenv("SHUNT_MASTER_PASSWORD")}, conns: &connModel{}}
-	os.MkdirAll(configDir(), 0o755)
-	if p, err := profile.Load(a.path, a.kr); err == nil {
-		a.prof = p
-	} else {
-		a.prof = profile.Default()
-	}
-	var out io.Writer = a
-	if lf, err := os.OpenFile(filepath.Join(configDir(), "shunt.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-		out = io.MultiWriter(a, lf)
-	}
-	log.SetOutput(out)
-
-	err := MainWindow{
-		AssignTo: &a.mw,
-		Title:    "Shunt",
-		MinSize:  Size{Width: 700, Height: 420},
-		Size:     Size{Width: 980, Height: 620},
-		Layout:   VBox{MarginsZero: true, SpacingZero: true},
-		MenuItems: []MenuItem{
-			Menu{Text: "&File", Items: []MenuItem{
-				Action{Text: "&New Profile", OnTriggered: func() { a.setProfile(profile.Default()) }},
-				Action{Text: "&Import Profile...", OnTriggered: a.importProfile},
-				Action{Text: "&Export Profile...", OnTriggered: a.exportProfile},
-				Separator{},
-				Action{Text: "E&xit", OnTriggered: func() { a.mw.Close() }},
-			}},
-			Menu{Text: "&Profile", Items: []MenuItem{
-				Action{Text: "&Proxy Servers...", OnTriggered: a.proxiesDialog},
-				Action{Text: "Proxification &Rules...", OnTriggered: a.rulesDialog},
-				Action{Text: "&Name Resolution...", OnTriggered: a.dnsDialog},
-				Action{Text: "&Advanced...", OnTriggered: a.advancedDialog},
-			}},
-			Menu{Text: "&View", Items: []MenuItem{
-				Action{Text: "&Disconnect Selected", OnTriggered: a.disconnect},
-				Action{Text: "&Clear Log", OnTriggered: func() { a.logTE.SetText("") }},
-			}},
-			Menu{Text: "&Help", Items: []MenuItem{
-				Action{Text: "&About Shunt...", OnTriggered: func() {
-					walk.MsgBox(a.mw, "About Shunt", "Shunt "+version+"\n\nFree and open source system-wide proxifier.\nMIT License.", walk.MsgBoxIconInformation)
-				}},
-			}},
-		},
-		ToolBar: ToolBar{ButtonStyle: ToolBarButtonTextOnly, Items: []MenuItem{
-			Action{AssignTo: &a.startAct, Text: "Start", OnTriggered: a.toggle},
-			Separator{},
-			Action{Text: "Proxy Servers", OnTriggered: a.proxiesDialog},
-			Action{Text: "Proxification Rules", OnTriggered: a.rulesDialog},
-			Action{Text: "Name Resolution", OnTriggered: a.dnsDialog},
-			Action{Text: "Advanced", OnTriggered: a.advancedDialog},
-		}},
-		Children: []Widget{
-			VSplitter{Children: []Widget{
-				TableView{
-					AssignTo: &a.connTV, AlternatingRowBG: true, ColumnsOrderable: true,
-					Columns: []TableViewColumn{
-						{Title: "Application", Width: 190}, {Title: "Target", Width: 250}, {Title: "Time/Status", Width: 90},
-						{Title: "Rule : Proxy", Width: 250}, {Title: "Sent", Width: 80}, {Title: "Received", Width: 80},
-					},
-					Model: a.conns,
-				},
-				TextEdit{AssignTo: &a.logTE, ReadOnly: true, VScroll: true, MaxSize: Size{Height: 220}},
-			}},
-		},
-		StatusBarItems: []StatusBarItem{{AssignTo: &a.sbi, Text: "Ready", Width: 700}},
-	}.Create()
-	if err != nil {
-		walk.MsgBox(nil, "Shunt", err.Error(), walk.MsgBoxIconError)
-		return
-	}
-	if ic, err := walk.NewIconFromImageForDPI(iconImage(), 96); err == nil {
-		a.mw.SetIcon(ic)
-	}
-	a.mw.Closing().Attach(func(*bool, walk.CloseReason) { a.stop() })
-	log.Printf("Welcome to Shunt %s. Profile: %s", version, a.path)
-	if len(a.prof.Proxies) == 0 {
-		log.Printf("No proxy servers are defined. Use Profile > Proxy Servers to add one, then press Start.")
-	}
-
-	go func() {
-		for range time.Tick(time.Second) {
-			a.mw.Synchronize(a.refresh)
-		}
-	}()
-	if autoStart {
-		a.mw.Synchronize(a.toggle)
-	}
-	a.mw.Run()
-}
-
-func (a *app) refresh() {
-	a.logMu.Lock()
-	s := a.logBuf.String()
-	a.logBuf.Reset()
-	a.logMu.Unlock()
-	if s != "" {
-		a.logTE.AppendText(strings.ReplaceAll(s, "\n", "\r\n"))
-	}
-	e := a.eng
-	if e == nil {
-		if len(a.conns.rows) > 0 {
-			a.conns.rows = nil
-			a.conns.PublishRowsReset()
-		}
-		a.sbi.SetText("Ready (stopped)")
-		return
-	}
-	rows := e.Conns()
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	sel := a.connTV.CurrentIndex()
-	a.conns.rows = rows
-	a.conns.PublishRowsReset()
-	if sel >= 0 && sel < len(rows) {
-		a.connTV.SetCurrentIndex(sel)
-	}
-	a.sbi.SetText(fmt.Sprintf("Running  |  %d active connections  |  %d total, %d failed  |  Sent %s  |  Received %s",
-		e.Active.Load(), e.Total.Load(), e.Failed.Load(), size(e.Sent.Load()), size(e.Recv.Load())))
-}
-
-func (a *app) disconnect() {
-	if i := a.connTV.CurrentIndex(); i >= 0 && i < len(a.conns.rows) {
-		a.conns.rows[i].Disconnect()
-	}
-}
-
-// ---- engine ------------------------------------------------------------------
-
-func (a *app) stop() {
-	if e := a.eng; e != nil {
-		a.eng = nil
-		e.Stop()
-		log.Printf("Stopped. Normal routing restored.")
-	}
-	a.startAct.SetText("Start")
-}
-
-func (a *app) toggle() {
-	if a.eng != nil {
-		a.stop()
-		return
-	}
-	if !tun.Elevated() {
-		if walk.MsgBox(a.mw, "Shunt", "Administrator rights are required to capture system traffic.\n\nRestart Shunt as administrator?", walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) == walk.DlgCmdYes {
-			exe, _ := os.Executable()
-			verb, _ := windows.UTF16PtrFromString("runas")
-			file, _ := windows.UTF16PtrFromString(exe)
-			args, _ := windows.UTF16PtrFromString("-start")
-			if windows.ShellExecute(0, verb, file, args, nil, windows.SW_SHOWNORMAL) == nil {
-				a.mw.Close()
-			}
-		}
-		return
-	}
-	if !usesProxy(a.prof) && walk.MsgBox(a.mw, "Shunt", "No enabled rule sends traffic to a proxy server, so every connection will go directly.\n\nOpen Proxification Rules and set the Default rule to your proxy, or press Yes to start anyway.", walk.MsgBoxYesNo|walk.MsgBoxIconWarning) != walk.DlgCmdYes {
-		return
-	}
-	e, err := core.New(a.prof.Clone())
-	if err == nil {
-		err = e.StartTUN()
-	}
-	if err != nil {
-		log.Printf("Cannot start: %v", err)
-		walk.MsgBox(a.mw, "Shunt", "Cannot start:\n"+err.Error(), walk.MsgBoxIconError)
-		return
-	}
-	a.eng = e
-	a.startAct.SetText("Stop")
-}
-
-// setProfile saves the profile and restarts the engine if it is running.
-func (a *app) setProfile(p *profile.Profile) {
-	p.Normalize()
-	if err := p.Validate(); err != nil {
-		walk.MsgBox(a.mw, "Shunt", err.Error(), walk.MsgBoxIconWarning)
-		return
-	}
-	a.prof = p
-	if err := p.Save(a.path, a.kr); err != nil {
-		log.Printf("Cannot save profile: %v", err)
-	}
-	if a.eng != nil {
-		log.Printf("Profile changed, restarting.")
-		a.stop()
-		a.toggle()
-	}
-}
-
-func (a *app) importProfile() {
-	d := walk.FileDialog{Title: "Import Profile", Filter: "Profiles (*.ppx;*.json)|*.ppx;*.json|All files (*.*)|*.*"}
-	if ok, _ := d.ShowOpen(a.mw); !ok {
-		return
-	}
-	p, err := profile.Load(d.FilePath, a.kr)
-	if p == nil {
-		walk.MsgBox(a.mw, "Import Profile", err.Error(), walk.MsgBoxIconError)
-		return
-	}
-	a.setProfile(p)
-	log.Printf("Imported %s: %d proxies, %d chains, %d rules (proxy passwords are not imported from .ppx).", d.FilePath, len(p.Proxies), len(p.Chains), len(p.Rules))
-}
-
-func (a *app) exportProfile() {
-	d := walk.FileDialog{Title: "Export Profile", Filter: "Proxifier profile (*.ppx)|*.ppx|Shunt profile (*.json)|*.json"}
-	if ok, _ := d.ShowSave(a.mw); !ok {
-		return
-	}
-	var b []byte
-	var err error
-	path := d.FilePath
-	if strings.HasSuffix(strings.ToLower(path), ".json") {
-		b, err = a.prof.Marshal(a.kr)
-	} else {
-		if !strings.HasSuffix(strings.ToLower(path), ".ppx") {
-			path += ".ppx"
-		}
-		b, err = a.prof.MarshalPPX()
-	}
-	if err == nil {
-		err = os.WriteFile(path, b, 0o644)
-	}
-	if err != nil {
-		walk.MsgBox(a.mw, "Export Profile", err.Error(), walk.MsgBoxIconError)
-	}
-}
-
-// ---- dialogs -------------------------------------------------------------------
 
 func buttons(dlg **walk.Dialog, ok **walk.PushButton, accept func() bool) Composite {
 	return Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
@@ -347,10 +32,15 @@ type listModel struct {
 	checked func(row int) *bool
 }
 
-func (m *listModel) RowCount() int                  { return m.n() }
-func (m *listModel) Value(r, c int) interface{}     { return m.value(r, c) }
-func (m *listModel) Checked(r int) bool             { return m.checked != nil && *m.checked(r) }
-func (m *listModel) SetChecked(r int, v bool) error { *m.checked(r) = v; return nil }
+func (m *listModel) RowCount() int              { return m.n() }
+func (m *listModel) Value(r, c int) interface{} { return m.value(r, c) }
+func (m *listModel) Checked(r int) bool         { return m.checked != nil && *m.checked(r) }
+func (m *listModel) SetChecked(r int, v bool) error {
+	if m.checked != nil {
+		*m.checked(r) = v
+	}
+	return nil
+}
 
 var proxyTypes = []string{profile.SOCKS5, profile.SOCKS4, profile.HTTPS, profile.HTTP}
 
@@ -701,7 +391,12 @@ func (a *app) dnsDialog() {
 		AssignTo: &dlg, Title: "Name Resolution", DefaultButton: &ok, MinSize: Size{Width: 540}, Layout: VBox{},
 		Children: []Widget{
 			GroupBox{Title: "Shunt DNS settings", Layout: VBox{}, Children: []Widget{
-				CheckBox{AssignTo: &auto, Text: "Detect DNS settings automatically", Checked: r.AutoDetect, OnCheckedChanged: func() { via.SetEnabled(!auto.Checked()) }},
+				CheckBox{AssignTo: &auto, Text: "Detect DNS settings automatically (resolve through proxy when a rule uses one)", Checked: r.AutoDetect, OnCheckedChanged: func() {
+					// The handler can fire while the dialog is still being built.
+					if via != nil && auto != nil {
+						via.SetEnabled(!auto.Checked())
+					}
+				}},
 				CheckBox{AssignTo: &via, Text: "Resolve hostnames through proxy", Checked: r.ViaProxy, Enabled: !r.AutoDetect},
 				CheckBox{AssignTo: &nonA, Text: "Block non A/AAAA queries if DNS goes through proxy", Checked: r.BlockNonA},
 			}},

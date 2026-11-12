@@ -12,7 +12,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,7 +38,19 @@ type Engine struct {
 	dev     *tun.Device
 	stack   *tun.Stack
 	gateway net.Listener
-	selfPID map[uint32]bool // local proxy processes: always direct (loop prevention)
+
+	// Infinite connection loop detection: processes that serve one of the
+	// profile's proxies on this machine always connect directly.
+	loopMu     sync.Mutex
+	selfPID    map[uint32]bool
+	localPorts []uint16                  // ports of proxies running on this machine
+	listeners  map[uint16]listenerSample // port -> listening PID (short cache)
+	// OnLoop is called (once per application) when a loop is detected, so the
+	// caller can add an "[auto-created]" Direct rule like Proxifier does.
+	OnLoop func(app string)
+
+	done     chan struct{}
+	stopOnce sync.Once
 
 	mu     sync.Mutex
 	failed map[int]time.Time // redundancy: proxy id -> time it failed
@@ -55,25 +69,86 @@ func New(p *profile.Profile) (*Engine, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	e := &Engine{prof: p, match: rules.Compile(p), failed: map[int]time.Time{}, sticky: map[uint32]int{}, selfPID: map[uint32]bool{}}
+	e := &Engine{prof: p, match: rules.Compile(p), failed: map[int]time.Time{}, sticky: map[uint32]int{},
+		selfPID: map[uint32]bool{}, listeners: map[uint16]listenerSample{}, done: make(chan struct{})}
 	// Shunt's own sockets are bound to the physical interface; should one ever
 	// reach the tunnel anyway, it must not be proxified back into itself.
 	e.selfPID[uint32(os.Getpid())] = true
 	e.bind.Store(&netif.Binding{})
 	e.dial = netif.Dialer(func() netif.Binding { return *e.bind.Load() })
-	// Infinite connection loop detection: a proxy running on this machine
-	// must never have its own connections proxified.
+	local := localAddrs()
+	for _, x := range p.Proxies {
+		ip, err := netip.ParseAddr(x.Address)
+		if strings.EqualFold(x.Address, "localhost") || (err == nil && (ip.IsLoopback() || ip.IsUnspecified() || local[ip.Unmap()])) {
+			e.localPorts = append(e.localPorts, uint16(x.Port))
+		}
+	}
 	if p.Options.ConnectionLoopDetection {
-		for _, x := range p.Proxies {
-			if ip, err := netip.ParseAddr(x.Address); (err == nil && ip.IsLoopback()) || x.Address == "localhost" {
-				if pid, ok := procinfo.ListenerPID(uint16(x.Port)); ok {
-					e.selfPID[pid] = true
-					log.Printf("loop detection: %s (pid %d) serves proxy %s and will connect directly", procinfo.ByPID(pid).Name, pid, x.HostPort())
-				}
+		for _, port := range e.localPorts {
+			if pid, ok := e.listenerPID(port); ok {
+				info := procinfo.ByPID(pid)
+				e.selfPID[pid] = true
+				log.Printf("loop detection: %s (pid %d) serves proxy port %d and will connect directly", info.Name, pid, port)
 			}
 		}
 	}
 	return e, nil
+}
+
+type listenerSample struct {
+	pid uint32
+	ok  bool
+	at  time.Time
+}
+
+func localAddrs() map[netip.Addr]bool {
+	out := map[netip.Addr]bool{}
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if p, err := netip.ParsePrefix(a.String()); err == nil {
+			out[p.Addr().Unmap()] = true
+		}
+	}
+	return out
+}
+
+// listenerPID returns the process currently listening on a local proxy port,
+// re-checked every few seconds so a restarted proxy (new PID) is noticed.
+func (e *Engine) listenerPID(port uint16) (uint32, bool) {
+	if s, ok := e.listeners[port]; ok && time.Since(s.at) < 3*time.Second {
+		return s.pid, s.ok
+	}
+	pid, ok := procinfo.ListenerPID(port)
+	e.listeners[port] = listenerSample{pid, ok, time.Now()}
+	return pid, ok
+}
+
+// isLoop reports whether a connection comes from a process that is itself one
+// of the profile's local proxy servers (or from Shunt). Proxifying it would
+// send the proxy's own traffic back into the proxy: an infinite loop.
+func (e *Engine) isLoop(f *flow) bool {
+	if f.proc.PID == 0 {
+		return false
+	}
+	e.loopMu.Lock()
+	defer e.loopMu.Unlock()
+	if e.selfPID[f.proc.PID] {
+		return true
+	}
+	if !e.prof.Options.ConnectionLoopDetection {
+		return false
+	}
+	for _, port := range e.localPorts {
+		if pid, ok := e.listenerPID(port); ok && pid == f.proc.PID {
+			e.selfPID[pid] = true
+			log.Printf("Infinite connection loop detected: %s (pid %d) is the proxy server on port %d. Its connections now go directly.", f.proc.Name, pid, port)
+			if e.OnLoop != nil && f.proc.Name != "" {
+				go e.OnLoop(f.proc.Name)
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) resolverConfig(viaProxy bool, upstreams []string) dns.Config {
@@ -102,9 +177,16 @@ func (e *Engine) start(scope []netip.Prefix) error {
 	e.res = dns.NewResolver(dns.NewFakeIP(tun.FakeIPPrefix), dns.Dialer(e.dial), e.resolverConfig(false, upstreams))
 	via := e.prof.Options.Resolve.ViaProxy
 	if e.prof.Options.Resolve.AutoDetect {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		via = !e.res.Probe(ctx)
-		cancel()
+		// Automatic mode: when traffic goes to a proxy, names are resolved by
+		// the proxy (local DNS may be filtered, poisoned or simply unable to
+		// see the proxy's network). Direct connections still get real
+		// addresses. Without proxy rules, local DNS is used if it answers.
+		via = usesProxy(e.prof)
+		if !via {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			via = !e.res.Probe(ctx)
+			cancel()
+		}
 	}
 	if e.prof.Options.LeakPrevention {
 		via = true
@@ -125,17 +207,34 @@ func (e *Engine) start(scope []netip.Prefix) error {
 	if e.stack, err = tun.NewStack(cfg.MTU, e); err != nil {
 		return err
 	}
-	if e.dev, err = tun.OpenDevice(cfg); err != nil {
+	// The adapter of a tunnel stopped a moment ago may still be going away;
+	// retry for a few seconds instead of failing a quick Stop/Start.
+	var dev *tun.Device
+	for try := 0; ; try++ {
+		if dev, err = tun.OpenDevice(cfg); err == nil || try == 5 {
+			break
+		}
+		log.Printf("tunnel adapter not ready (%v), retrying", err)
+		time.Sleep(700 * time.Millisecond)
+	}
+	if err != nil {
 		e.stack.Close()
 		return err
 	}
-	e.dev.Run(e.stack)
+	e.dev = dev
+	dev.Run(e.stack)
 	go func() { // follow default-route changes (Wi-Fi <-> Ethernet)
-		for e.dev != nil {
-			time.Sleep(5 * time.Second)
-			if b, err := netif.Default(e.dev.Index()); err == nil && b.Index != e.bind.Load().Index {
-				e.bind.Store(&b)
-				log.Printf("physical interface changed to %s", b.Name)
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-e.done:
+				return
+			case <-t.C:
+				if b, err := netif.Default(dev.Index()); err == nil && b.Index != e.bind.Load().Index {
+					e.bind.Store(&b)
+					log.Printf("physical interface changed to %s", b.Name)
+				}
 			}
 		}
 	}()
@@ -143,17 +242,36 @@ func (e *Engine) start(scope []netip.Prefix) error {
 	return nil
 }
 
-// Stop tears everything down and restores normal routing.
+func usesProxy(p *profile.Profile) bool {
+	for _, r := range p.Rules {
+		if r.Enabled && (r.Action.Type == profile.ActProxy || r.Action.Type == profile.ActChain) {
+			return true
+		}
+	}
+	return false
+}
+
+// Stop tears everything down and restores normal routing. It is safe to call
+// more than once and from any goroutine.
 func (e *Engine) Stop() {
-	if e.gateway != nil {
-		e.gateway.Close()
-	}
-	if d := e.dev; d != nil {
-		e.dev = nil
-		d.Close()
-	}
-	if e.stack != nil {
-		e.stack.Close()
+	e.stopOnce.Do(func() {
+		close(e.done)
+		if e.gateway != nil {
+			e.gateway.Close()
+		}
+		if e.dev != nil {
+			e.dev.Close()
+		}
+		if e.stack != nil {
+			e.stack.Close()
+		}
+	})
+}
+
+// guard keeps a failure in one connection from taking the whole program down.
+func guard(what string) {
+	if r := recover(); r != nil {
+		log.Printf("internal error in %s: %v\n%s", what, r, debug.Stack())
 	}
 }
 
@@ -177,6 +295,7 @@ func (f *flow) target() string {
 
 // HandleTCP implements tun.Handler.
 func (e *Engine) HandleTCP(r tun.TCPRequest) {
+	defer guard("TCP handler")
 	f := flow{ip: r.Dst.Addr(), port: r.Dst.Port()}
 	f.proc, _ = procinfo.Lookup("tcp", r.Src, r.Dst)
 	if h, fake := e.res.HostFor(f.ip); h != "" {
@@ -198,6 +317,7 @@ func (e *Engine) HandleTCP(r tun.TCPRequest) {
 // HandleUDP implements tun.Handler: DNS is answered by the resolver, other
 // UDP is bypassed or blocked according to the profile.
 func (e *Engine) HandleUDP(r tun.UDPRequest) {
+	defer guard("UDP handler")
 	c, err := r.Accept()
 	if err != nil {
 		return
@@ -267,7 +387,7 @@ func (e *Engine) matchRule(f *flow) (int, *profile.Rule) {
 	o := &e.prof.Options
 	last := len(e.prof.Rules) - 1
 	direct := &profile.Rule{Name: "(bypass)", Action: profile.Action{Type: profile.ActDirect}}
-	if e.selfPID[f.proc.PID] || (f.proc.OtherUser && !o.ProcessOtherUsers) || (f.proc.Service && !o.ProcessServices) {
+	if e.isLoop(f) || (f.proc.OtherUser && !o.ProcessOtherUsers) || (f.proc.Service && !o.ProcessServices) {
 		return -1, direct
 	}
 	q := rules.Query{AppName: f.proc.Name, AppPath: f.proc.Path, Host: f.host, Port: f.port}
