@@ -41,7 +41,7 @@ lets rules match on host names and lets names be resolved by the proxy
 | UDP | Bypass, block UDP 443 (QUIC) for proxied rules, block all UDP for proxied rules |
 | Safety | Live connection-loop detection: a proxy running on this PC is recognised even after it restarts, connects directly, and gets an "[auto-created]" Direct rule like in Proxifier, DNS/IP leak prevention mode, services / other users filtering |
 | Profiles | JSON profiles, **import and export of Proxifier `.ppx` files**, passwords stored plain / static key / Windows DPAPI / master password |
-| GUI | Proxifier-style window with a large Start/Stop button, status line and icon toolbar: live connections list (application, target, time, rule : proxy, sent, received), log pane, status bar; dialogs for proxy servers, proxification rules, name resolution and advanced options; profile import/export |
+| GUI | Proxifier-style window with a large Start/Stop button, status line and icon toolbar: system tray icon (left-click to open, right-click for Start/Stop and Exit; the close button asks whether to exit or minimize to tray, and can remember the choice), live connections list (application, target, time, rule : proxy, sent, received), log pane, status bar; dialogs for proxy servers, proxification rules, name resolution and advanced options; profile import/export |
 | Tools | Proxy checker (reachability, connection through the proxy, latency), command line mode, log file |
 
 ## Quick start

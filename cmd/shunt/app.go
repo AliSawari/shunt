@@ -35,22 +35,27 @@ func attachConsole() {
 }
 
 type app struct {
-	mw       *walk.MainWindow
-	tb       *walk.ToolBar
-	prof     *profile.Profile
-	path     string
-	kr       *profile.Keyring
-	eng      *core.Engine
-	busy     bool
-	startAct *walk.Action
-	startBtn *walk.PushButton
-	stateLbl *walk.Label
-	stateSub *walk.Label
-	connTV   *walk.TableView
-	conns    *connModel
-	logTE    *walk.TextEdit
-	sbi      *walk.StatusBarItem
-	icons    map[string]*walk.Icon
+	mw           *walk.MainWindow
+	tb           *walk.ToolBar
+	prof         *profile.Profile
+	path         string
+	kr           *profile.Keyring
+	eng          *core.Engine
+	busy         bool
+	quitting     bool
+	settings     uiSettings
+	ni           *walk.NotifyIcon
+	trayStart    *walk.Action
+	trayCloseAct *walk.Action
+	startAct     *walk.Action
+	startBtn     *walk.PushButton
+	stateLbl     *walk.Label
+	stateSub     *walk.Label
+	connTV       *walk.TableView
+	conns        *connModel
+	logTE        *walk.TextEdit
+	sbi          *walk.StatusBarItem
+	icons        map[string]*walk.Icon
 
 	logMu  sync.Mutex
 	logBuf strings.Builder
@@ -168,8 +173,12 @@ func (a *app) icon(name string, img func(int) *image.NRGBA, px int) *walk.Icon {
 // singleInstance makes sure only one Shunt window runs: two instances would
 // fight over the same tunnel adapter. A second launch brings the first window
 // to the front. The elevated relaunch (-start) waits for the old one to exit.
+// instanceMutex names the single-instance lock. Test builds that must run
+// next to a normal instance override it with -ldflags "-X main.instanceMutex=...".
+var instanceMutex = `Local\Shunt.SingleInstance`
+
 func singleInstance(wait bool) bool {
-	name, _ := windows.UTF16PtrFromString(`Local\Shunt.SingleInstance`)
+	name, _ := windows.UTF16PtrFromString(instanceMutex)
 	h, err := windows.CreateMutex(nil, false, name)
 	if h == 0 {
 		focusExisting()
@@ -205,6 +214,7 @@ func gui() {
 	}
 	a := &app{path: defaultProfile(), kr: &profile.Keyring{Master: os.Getenv("SHUNT_MASTER_PASSWORD")}, conns: &connModel{}, icons: map[string]*walk.Icon{}}
 	a.setupLogging()
+	a.settings = loadSettings()
 	if p, err := profile.Load(a.path, a.kr); err == nil {
 		a.prof = p
 	} else {
@@ -229,7 +239,7 @@ func gui() {
 				Separator{},
 				Action{Text: "Open &Log Folder", OnTriggered: func() { openURL(configDir()) }},
 				Separator{},
-				Action{Text: "E&xit", OnTriggered: func() { a.mw.Close() }},
+				Action{Text: "E&xit", OnTriggered: a.quit},
 			}},
 			Menu{Text: "&Profile", Items: []MenuItem{
 				Action{Text: "&Proxy Servers...", OnTriggered: a.safe(a.proxiesDialog)},
@@ -240,6 +250,14 @@ func gui() {
 			Menu{Text: "&View", Items: []MenuItem{
 				Action{Text: "&Disconnect Selected", OnTriggered: a.safe(a.disconnect)},
 				Action{Text: "&Clear Log", OnTriggered: func() { a.logTE.SetText("") }},
+				Separator{},
+				Action{AssignTo: &a.trayCloseAct, Text: "Close Button &Minimizes to Tray", Checkable: true, Checked: a.settings.CloseAction == closeTray, OnTriggered: func() {
+					a.settings.CloseAction = closeAsk
+					if a.trayCloseAct.Checked() {
+						a.settings.CloseAction = closeTray
+					}
+					a.saveSettings()
+				}},
 			}},
 			Menu{Text: "&Help", Items: []MenuItem{
 				Action{Text: "&GitHub Page", OnTriggered: func() { openURL(brand.RepoURL) }},
@@ -292,6 +310,9 @@ func gui() {
 	} else if ic := a.icon("logo", brand.Logo, 32); ic != nil {
 		a.mw.SetIcon(ic)
 	}
+	if ic, ok := a.mw.Icon().(*walk.Icon); ok {
+		appIcon = ic
+	}
 
 	// Toolbar: 28 px icons instead of walk's 16 px default.
 	dpi := a.mw.DPI()
@@ -320,11 +341,8 @@ func gui() {
 	a.startAct = startAct
 	a.updateState()
 
-	a.mw.Closing().Attach(func(*bool, walk.CloseReason) {
-		if a.eng != nil {
-			a.eng.Stop()
-		}
-	})
+	a.mw.Closing().Attach(a.onClosing)
+	a.setupTray()
 	log.Printf("Welcome to Shunt %s. Profile: %s", version, a.path)
 	if len(a.prof.Proxies) == 0 {
 		log.Printf("No proxy servers are defined. Use Profile > Proxy Servers to add one, then press Start.")
@@ -368,6 +386,9 @@ func (a *app) refresh() {
 	if sel >= 0 && sel < len(rows) {
 		a.connTV.SetCurrentIndex(sel)
 	}
+	if a.ni != nil {
+		a.ni.SetToolTip(fmt.Sprintf("Shunt - running\n%d active connections\nSent %s, received %s", e.Active.Load(), size(e.Sent.Load()), size(e.Recv.Load())))
+	}
 	a.sbi.SetText(fmt.Sprintf("Running  |  %d active connections  |  %d total, %d failed  |  Sent %s  |  Received %s",
 		e.Active.Load(), e.Total.Load(), e.Failed.Load(), size(e.Sent.Load()), size(e.Recv.Load())))
 }
@@ -406,6 +427,13 @@ func (a *app) updateState() {
 	a.stateLbl.SetText(state)
 	a.stateLbl.SetTextColor(color)
 	a.stateSub.SetText(sub)
+	if a.trayStart != nil {
+		a.trayStart.SetText("&" + strings.TrimSpace(text))
+		a.trayStart.SetEnabled(!a.busy)
+	}
+	if a.ni != nil && !running {
+		a.ni.SetToolTip("Shunt - " + strings.ToLower(state))
+	}
 }
 
 func (a *app) setBusy(b bool, status string) {
@@ -437,7 +465,7 @@ func (a *app) toggle() {
 			file, _ := windows.UTF16PtrFromString(exe)
 			args, _ := windows.UTF16PtrFromString("-start")
 			if windows.ShellExecute(0, verb, file, args, nil, windows.SW_SHOWNORMAL) == nil {
-				a.mw.Close()
+				a.quit()
 			}
 		}
 		return

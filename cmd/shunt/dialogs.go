@@ -75,7 +75,7 @@ func (a *app) proxyDialog(owner walk.Form, px *profile.Proxy) bool {
 		portText = strconv.Itoa(px.Port)
 	}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Proxy Server", DefaultButton: &ok, MinSize: Size{Width: 420}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Proxy Server", DefaultButton: &ok, MinSize: Size{Width: 420}, Layout: VBox{},
 		Children: []Widget{
 			GroupBox{Title: "Server", Layout: Grid{Columns: 4}, Children: []Widget{
 				Label{Text: "Address:"}, LineEdit{AssignTo: &addr, Text: px.Address},
@@ -115,7 +115,7 @@ func (a *app) checkProxy(owner walk.Form, px *profile.Proxy) {
 	var dlg *walk.Dialog
 	var out *walk.TextEdit
 	Dialog{
-		AssignTo: &dlg, Title: "Proxy Checker - " + px.HostPort(), MinSize: Size{Width: 620, Height: 380}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Proxy Checker - " + px.HostPort(), MinSize: Size{Width: 620, Height: 380}, Layout: VBox{},
 		Children: []Widget{
 			TextEdit{AssignTo: &out, ReadOnly: true, VScroll: true, Text: "Testing " + px.Type + " " + px.HostPort() + " ...\r\n"},
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{HSpacer{}, PushButton{Text: "Close", OnClicked: func() { dlg.Accept() }}}},
@@ -143,7 +143,7 @@ func (a *app) proxiesDialog() {
 		}
 	}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Proxy Servers", DefaultButton: &ok, MinSize: Size{Width: 560, Height: 340}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Proxy Servers", DefaultButton: &ok, MinSize: Size{Width: 560, Height: 340}, Layout: VBox{},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 				TableView{AssignTo: &tv, Model: m, OnItemActivated: edit, Columns: []TableViewColumn{
@@ -233,7 +233,7 @@ func (a *app) ruleDialog(owner walk.Form, p *profile.Profile, r *profile.Rule, i
 		}
 	}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Proxification Rule", DefaultButton: &ok, MinSize: Size{Width: 520}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Proxification Rule", DefaultButton: &ok, MinSize: Size{Width: 520}, Layout: VBox{},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 				Label{Text: "Name:"}, LineEdit{AssignTo: &name, Text: r.Name},
@@ -329,7 +329,7 @@ func (a *app) rulesDialog() {
 		m.PublishRowsReset()
 	}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Proxification Rules", DefaultButton: &ok, MinSize: Size{Width: 860, Height: 420}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Proxification Rules", DefaultButton: &ok, MinSize: Size{Width: 860, Height: 420}, Layout: VBox{},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 				TableView{AssignTo: &tv, Model: m, CheckBoxes: true, OnItemActivated: edit, Columns: []TableViewColumn{
@@ -388,7 +388,7 @@ func (a *app) dnsDialog() {
 		onlyIdx = 1
 	}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Name Resolution", DefaultButton: &ok, MinSize: Size{Width: 540}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Name Resolution", DefaultButton: &ok, MinSize: Size{Width: 540}, Layout: VBox{},
 		Children: []Widget{
 			GroupBox{Title: "Shunt DNS settings", Layout: VBox{}, Children: []Widget{
 				CheckBox{AssignTo: &auto, Text: "Detect DNS settings automatically (resolve through proxy when a rule uses one)", Checked: r.AutoDetect, OnCheckedChanged: func() {
@@ -430,7 +430,7 @@ func (a *app) advancedDialog() {
 	udpModes := []string{profile.UDPBypass, profile.UDPBlock443, profile.UDPBlockAll}
 	encModes := []string{profile.EncDisabled, profile.EncBasic, profile.EncUser}
 	res, _ := Dialog{
-		AssignTo: &dlg, Title: "Advanced", DefaultButton: &ok, MinSize: Size{Width: 520}, Layout: VBox{},
+		AssignTo: &dlg, Icon: appIcon, Title: "Advanced", DefaultButton: &ok, MinSize: Size{Width: 520}, Layout: VBox{},
 		Children: []Widget{
 			GroupBox{Title: "Services and other users", Layout: VBox{}, Children: []Widget{
 				CheckBox{AssignTo: &users, Text: "Applications run by other users on this computer", Checked: o.ProcessOtherUsers},
