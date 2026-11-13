@@ -84,12 +84,62 @@ func (a *app) safe(f func()) func() {
 
 // ---- connections table -----------------------------------------------------
 
+// connModel is the live connections table. It implements walk.Sorter so the
+// column headers sort ascending/descending; walk answers every RowsChanged
+// on a sorted model with a full repaint, which keeps the rows current.
 type connModel struct {
 	walk.TableModelBase
+	walk.SorterBase
 	rows []*core.ConnInfo
 }
 
 func (m *connModel) RowCount() int { return len(m.rows) }
+
+// Sort orders the rows by the clicked column; ties keep arrival order.
+func (m *connModel) Sort(col int, order walk.SortOrder) error {
+	now := time.Now()
+	key := func(c *core.ConnInfo, other *core.ConnInfo) int {
+		switch col {
+		case 0:
+			if r := strings.Compare(strings.ToLower(c.App), strings.ToLower(other.App)); r != 0 {
+				return r
+			}
+			return cmpInt(int64(c.PID), int64(other.PID))
+		case 1:
+			return strings.Compare(strings.ToLower(c.Target), strings.ToLower(other.Target))
+		case 2:
+			return cmpInt(int64(now.Sub(c.Start)), int64(now.Sub(other.Start)))
+		case 3:
+			return strings.Compare(strings.ToLower(c.Rule+c.Via), strings.ToLower(other.Rule+other.Via))
+		case 4:
+			return cmpInt(c.Sent.Load(), other.Sent.Load())
+		case 5:
+			return cmpInt(c.Recv.Load(), other.Recv.Load())
+		}
+		return 0
+	}
+	sort.SliceStable(m.rows, func(i, j int) bool {
+		r := key(m.rows[i], m.rows[j])
+		if r == 0 {
+			return m.rows[i].ID < m.rows[j].ID
+		}
+		if order == walk.SortDescending {
+			return r > 0
+		}
+		return r < 0
+	})
+	return m.SorterBase.Sort(col, order)
+}
+
+func cmpInt(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
 func (m *connModel) Value(row, col int) interface{} {
 	if row >= len(m.rows) {
 		return ""
@@ -338,6 +388,8 @@ func gui() {
 		a.mw.SetSizePixels(walk.Size{Width: sz.Width, Height: sz.Height + 1})
 		a.mw.SetSizePixels(sz)
 	}
+	// Default order: oldest connection first (longest running), like arrival order.
+	a.conns.Sort(2, walk.SortDescending)
 	a.startAct = startAct
 	a.updateState()
 
@@ -378,13 +430,31 @@ func (a *app) refresh() {
 		}
 		return
 	}
+	// Keep the selected connection selected (by identity, since sorting moves
+	// rows), then replace the rows. RowsChanged makes walk re-sort and repaint
+	// every row, so times and byte counts update without hovering.
+	var selID int64 = -1
+	if i := a.connTV.CurrentIndex(); i >= 0 && i < len(a.conns.rows) {
+		selID = a.conns.rows[i].ID
+	}
 	rows := e.Conns()
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	sel := a.connTV.CurrentIndex()
+	countChanged := len(rows) != len(a.conns.rows)
 	a.conns.rows = rows
-	a.conns.PublishRowsReset()
-	if sel >= 0 && sel < len(rows) {
-		a.connTV.SetCurrentIndex(sel)
+	if countChanged {
+		a.conns.PublishRowsReset()
+	}
+	if len(rows) > 0 {
+		a.conns.PublishRowsChanged(0, len(rows)-1)
+	}
+	if selID >= 0 {
+		for i, c := range a.conns.rows {
+			if c.ID == selID {
+				if a.connTV.CurrentIndex() != i {
+					a.connTV.SetCurrentIndex(i)
+				}
+				break
+			}
+		}
 	}
 	if a.ni != nil {
 		a.ni.SetToolTip(fmt.Sprintf("Shunt - running\n%d active connections\nSent %s, received %s", e.Active.Load(), size(e.Sent.Load()), size(e.Recv.Load())))
