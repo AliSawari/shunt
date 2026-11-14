@@ -44,6 +44,13 @@ lets rules match on host names and lets names be resolved by the proxy
 | GUI | Proxifier-style window with a large Start/Stop button, status line and icon toolbar: system tray icon (left-click to open, right-click for Start/Stop and Exit; the close button asks whether to exit or minimize to tray, and can remember the choice), live connections list (application, target, time, rule : proxy, sent, received), log pane, status bar; dialogs for proxy servers, proxification rules, name resolution and advanced options; profile import/export |
 | Tools | Proxy checker (reachability, connection through the proxy, latency), command line mode, log file |
 
+## Download
+
+Get the latest version from [Releases](https://github.com/AliSawari/shunt/releases/latest): the portable
+zip contains `shunt.exe` and `wintun.dll`. Every commit on `main` is also built
+automatically and published as the [nightly](https://github.com/AliSawari/shunt/releases/tag/nightly)
+pre-release. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
 ## Quick start
 
 1. Keep `wintun.dll` next to `shunt.exe`. It is the signed WireGuard TUN driver

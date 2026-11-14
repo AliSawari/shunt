@@ -25,7 +25,8 @@ import (
 	"shunt/internal/proxy"
 )
 
-const version = "0.2.0"
+// version is the release number; CI stamps it with -ldflags "-X main.version=...".
+var version = "0.2.0"
 
 func configDir() string {
 	d, _ := os.UserConfigDir()
